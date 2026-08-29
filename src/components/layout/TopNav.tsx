@@ -68,14 +68,9 @@ export default function TopNav({ sessionData, currentTab, hasSprint = false }: T
           </Link>
           
           {hasSprint && (
-            <>
-              <Link href="/?tab=sprint_quali" className={getLinkClasses('sprint_quali')}>
-                Sprint Quali
-              </Link>
-              <Link href="/?tab=sprint" className={getLinkClasses('sprint')}>
-                Sprint
-              </Link>
-            </>
+            <Link href="/?tab=sprint" className={getLinkClasses('sprint')}>
+              Sprint
+            </Link>
           )}
 
           <Link href="/?tab=quali" className={getLinkClasses('quali')}>

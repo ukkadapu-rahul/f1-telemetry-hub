@@ -10,6 +10,8 @@ interface QualiResult {
   position: number;
   broadcast_name: string;
   team_name: string;
+  team_colour?: string;
+  lap_duration?: number;
 }
 
 interface SpeedData {
@@ -17,47 +19,64 @@ interface SpeedData {
   driver: string;
 }
 
-// Make topSpeed optional with the '?'
+function formatTime(seconds?: number) {
+  if (!seconds) return 'NO TIME';
+  const mins = Math.floor(seconds / 60);
+  const secs = (seconds % 60).toFixed(3);
+  return `${mins}:${secs.padStart(6, '0')}`;
+}
+
 export default function QualifyingView({ results, topSpeed }: { results: QualiResult[], topSpeed?: SpeedData }) {
   const [isGridExpanded, setIsGridExpanded] = useState(false);
   const safeResults = results || [];
+  const totalDrivers = safeResults.length || 22;
   
-  const visibleGrid = isGridExpanded ? safeResults : safeResults.slice(0, 5);
+  // Top 10 preview by default
+  const visibleGrid = isGridExpanded ? safeResults : safeResults.slice(0, 10);
   
   return (
     <div className="w-full max-w-7xl mx-auto space-y-6">
-      {/* Dynamically switch between 3 columns (Normal Quali) and 2 columns (Sprint Quali) */}
-      <div className={`grid grid-cols-1 ${topSpeed ? 'lg:grid-cols-3' : 'lg:grid-cols-2 max-w-5xl mx-auto'} gap-6 items-start`}>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
         
-        {/* LEFT COLUMN: Expandable Starting Grid */}
-        <motion.div layout className="bg-slate-900/60 border border-slate-800 rounded-xl p-5 backdrop-blur-md">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
+        {/* Expanded Starting Grid */}
+        <motion.div layout className={`bg-slate-900/60 border border-slate-800 rounded-xl p-6 backdrop-blur-md ${topSpeed ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
+          <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-6">
             <div className="flex items-center space-x-2">
-              <Trophy className="w-4 h-4 text-red-500" />
-              <h3 className="text-sm font-bold uppercase tracking-wider text-slate-200">Starting Grid</h3>
+              <Trophy className="w-5 h-5 text-red-500" />
+              <h3 className="text-sm font-bold uppercase tracking-wider text-slate-200">Official Starting Grid</h3>
             </div>
             <span className="text-xs text-slate-500 font-mono">
-              {isGridExpanded ? '20 / 20 Drivers' : 'Top 5 Preview'}
+              {isGridExpanded ? `${totalDrivers} / ${totalDrivers} Drivers` : 'Top 10 Preview'}
             </span>
           </div>
 
-          <motion.div layout className="space-y-2">
+          <motion.div layout className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {visibleGrid.map((driver) => (
               <motion.div 
                 layout
                 key={driver.driver_number}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                className="flex items-center justify-between p-2.5 rounded-lg bg-slate-950/40 hover:bg-slate-800/40 border border-slate-800/60 transition-colors"
+                className="flex items-center justify-between p-3.5 rounded-lg bg-slate-950/40 hover:bg-slate-800/40 border border-slate-800/60 transition-colors"
               >
-                <div className="flex items-center space-x-3">
-                  <span className="font-mono text-xs w-5 text-slate-500 font-bold">
+                <div className="flex items-center space-x-4">
+                  <span className="font-mono text-lg w-6 text-center text-slate-500 font-black">
                     P{driver.position}
                   </span>
+                  <div 
+                    className="w-1.5 h-8 rounded-full" 
+                    style={{ backgroundColor: driver.team_colour ? `#${driver.team_colour}` : '#ffffff' }} 
+                  />
                   <div>
-                    <p className="text-sm font-semibold text-slate-200">{driver.broadcast_name}</p>
+                    <p className="text-sm font-bold text-slate-200">{driver.broadcast_name}</p>
                     <p className="text-xs text-slate-500">{driver.team_name}</p>
                   </div>
+                </div>
+                
+                <div className="text-right pr-2">
+                  <span className="font-mono text-sm font-medium text-slate-300 tracking-wider">
+                    {formatTime(driver.lap_duration)}
+                  </span>
                 </div>
               </motion.div>
             ))}
@@ -65,42 +84,24 @@ export default function QualifyingView({ results, topSpeed }: { results: QualiRe
 
           <button 
             onClick={() => setIsGridExpanded(!isGridExpanded)}
-            className="w-full mt-4 py-2 text-xs font-semibold uppercase tracking-wider text-red-500 hover:text-red-400 bg-red-950/20 hover:bg-red-950/40 border border-red-900/30 rounded-lg transition-all"
+            className="w-full mt-6 py-2.5 text-xs font-bold uppercase tracking-wider text-red-500 hover:text-red-400 bg-red-950/20 hover:bg-red-950/40 border border-red-900/30 rounded-lg transition-all"
           >
-            {isGridExpanded ? '▲ Collapse to Top 5' : '▼ View Full Grid (20 Cars)'}
+            {isGridExpanded ? '▲ Collapse Grid' : `▼ View Full Grid (${totalDrivers} Cars)`}
           </button>
         </motion.div>
 
-        {/* MIDDLE COLUMN: Classification */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5 backdrop-blur-md">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
-            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-200">Session Classification</h3>
-          </div>
-          <div className="space-y-2">
-            {safeResults.slice(0, 8).map((row) => (
-              <div key={row.driver_number} className="flex items-center justify-between p-2.5 rounded-lg bg-slate-950/40 border border-slate-800/60 text-xs">
-                <div className="flex items-center space-x-2">
-                  <span className="font-mono text-slate-500">{row.position}.</span>
-                  <span className="font-medium text-slate-300">{row.broadcast_name}</span>
-                </div>
-                <span className="font-mono text-slate-500">{row.team_name}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* RIGHT COLUMN: Misc Stats (Only renders if topSpeed is passed) */}
+        {/* Top Speed Card (Only for sessions where topSpeed is passed) */}
         {topSpeed && (
           <div className="space-y-6">
-            <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5 backdrop-blur-md">
+            <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-6 backdrop-blur-md">
               <div className="flex items-center space-x-2 border-b border-slate-800 pb-3 mb-3">
                 <Gauge className="w-4 h-4 text-red-500" />
                 <h3 className="text-sm font-bold uppercase tracking-wider text-slate-200">Top Speed Trap</h3>
               </div>
               <div className="flex items-baseline justify-between mt-2">
                 <div>
-                  <p className="text-2xl font-bold font-mono text-slate-100">{topSpeed.speed} <span className="text-xs text-slate-500">km/h</span></p>
-                  <p className="text-xs text-slate-400 mt-1">{topSpeed.driver}</p>
+                  <p className="text-3xl font-black font-mono text-slate-100">{topSpeed.speed} <span className="text-sm text-slate-500 font-normal">km/h</span></p>
+                  <p className="text-sm font-medium text-slate-400 mt-1">{topSpeed.driver}</p>
                 </div>
               </div>
             </div>

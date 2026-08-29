@@ -123,19 +123,151 @@ async function getLatestRaceSessionKey() {
 
 // --- 3. VIEW FETCHERS --- //
 export async function getQualifyingResults() {
-  const sessions = await getLatestMeetingSessions();
-  const qualiSession = sessions.find((s: { session_name: string }) => s.session_name === 'Qualifying');
-  
-  if (!qualiSession) return { status: 'pending' };
-  return fetchSessionData(qualiSession.session_key);
+  try {
+    const sessions = await getLatestMeetingSessions();
+    const raceSession = sessions.find((s: { session_name: string }) => s.session_name === 'Race');
+    const qualiSession = sessions.find((s: { session_name: string }) => s.session_name === 'Qualifying');
+    
+    if (!raceSession) return { status: 'pending' };
+
+    // 1. Fetch Official Starting Grid
+    const gridRes = await fetch(`https://api.openf1.org/v1/starting_grid?session_key=${raceSession.session_key}`);
+    const gridData = await gridRes.json();
+    let safeGrid = Array.isArray(gridData) ? gridData : [];
+    
+    // Fallback if missing
+    if (safeGrid.length === 0 && qualiSession) {
+        const qualiRes = await fetch(`https://api.openf1.org/v1/session_result?session_key=${qualiSession.session_key}`);
+        const qualiData = await qualiRes.json();
+        safeGrid = Array.isArray(qualiData) ? qualiData : [];
+    }
+
+    // 2. ALWAYS fetch laps from Qualifying to guarantee we have times
+    const bestLaps = new Map();
+    if (qualiSession) {
+        const lapsRes = await fetch(`https://api.openf1.org/v1/laps?session_key=${qualiSession.session_key}`);
+        const lapsData = await lapsRes.json();
+        
+        if (Array.isArray(lapsData)) {
+            lapsData.forEach((lap: { driver_number: number; lap_duration: number }) => {
+                if (lap.lap_duration) {
+                   const currentBest = bestLaps.get(lap.driver_number) || 9999;
+                   if (lap.lap_duration < currentBest) {
+                       bestLaps.set(lap.driver_number, lap.lap_duration);
+                   }
+                }
+            });
+        }
+    }
+
+    // 3. Fetch Drivers
+    let driversRes = await fetch(`https://api.openf1.org/v1/drivers?session_key=${raceSession.session_key}`);
+    let safeDrivers = await driversRes.json();
+    if (!Array.isArray(safeDrivers) || safeDrivers.length === 0) {
+      driversRes = await fetch(`https://api.openf1.org/v1/drivers?meeting_key=${raceSession.meeting_key}`);
+      safeDrivers = await driversRes.json();
+      safeDrivers = Array.isArray(safeDrivers) ? safeDrivers : [];
+    }
+
+    // 4. Merge Grid, Laps, and Drivers
+    const combinedData = safeGrid.map((result: { driver_number: number; position: number; lap_duration?: number }) => {
+      const driverInfo = safeDrivers.find((d: { driver_number: number; broadcast_name: string; team_name: string; team_colour: string }) => 
+        Number(d.driver_number) === Number(result.driver_number)
+      );
+      
+      // Use our manually calculated lap if the grid API failed to provide it
+      const finalLapDuration = result.lap_duration || bestLaps.get(result.driver_number);
+
+      return {
+        driver_number: result.driver_number,
+        position: result.position || 999, 
+        lap_duration: finalLapDuration, 
+        broadcast_name: driverInfo?.broadcast_name || 'Unknown',
+        team_name: driverInfo?.team_name || 'Unknown',
+        team_colour: driverInfo?.team_colour || 'ffffff'
+      };
+    });
+
+    combinedData.sort((a: { position: number }, b: { position: number }) => a.position - b.position);
+    return combinedData;
+    
+  } catch (err) {
+    console.error("Starting grid fetch failed", err);
+    return { status: 'pending' };
+  }
 }
 
 export async function getRaceResults() {
-  const sessions = await getLatestMeetingSessions();
-  const raceSession = sessions.find((s: { session_name: string }) => s.session_name === 'Race');
-  
-  if (!raceSession) return { status: 'pending' };
-  return fetchSessionData(raceSession.session_key);
+  try {
+    const sessions = await getLatestMeetingSessions();
+    const raceSession = sessions.find((s: { session_name: string }) => s.session_name === 'Race');
+    
+    if (!raceSession) return { status: 'pending' };
+
+    // 1. Fetch Official Race Results
+    const resultsRes = await fetch(`https://api.openf1.org/v1/session_result?session_key=${raceSession.session_key}`);
+    const results = await resultsRes.json();
+    const safeResults = Array.isArray(results) ? results : [];
+
+    if (safeResults.length === 0) return { status: 'pending' };
+
+    // 2. Fetch Starting Grid (To calculate Positions Gained/Lost)
+    const gridRes = await fetch(`https://api.openf1.org/v1/starting_grid?session_key=${raceSession.session_key}`);
+    const gridData = await gridRes.json();
+    const safeGrid = Array.isArray(gridData) ? gridData : [];
+
+    // 3. Fetch Drivers (Bulletproof fallback using meeting_key)
+    let driversRes = await fetch(`https://api.openf1.org/v1/drivers?session_key=${raceSession.session_key}`);
+    let safeDrivers = await driversRes.json();
+    
+    if (!Array.isArray(safeDrivers) || safeDrivers.length === 0) {
+      driversRes = await fetch(`https://api.openf1.org/v1/drivers?meeting_key=${raceSession.meeting_key}`);
+      safeDrivers = await driversRes.json();
+      safeDrivers = Array.isArray(safeDrivers) ? safeDrivers : [];
+    }
+
+// 4. Merge Data
+    const combinedData = safeResults.map((result: { driver_number: number; position: number; points: number }) => {
+      const driverInfo = safeDrivers.find((d: { driver_number: number; broadcast_name: string; team_name: string; team_colour: string }) => 
+        Number(d.driver_number) === Number(result.driver_number)
+      );
+      
+      //Force strict Number() comparison to prevent string/number mismatches
+      const startingSlot = safeGrid.find((g: { driver_number: number; position: number }) => 
+        Number(g.driver_number) === Number(result.driver_number)
+      );
+
+      // Add a quick debug log so we can see it in the VS Code terminal
+      if (!startingSlot) {
+         console.warn(`Missing grid data for Driver ${result.driver_number}`);
+      }
+
+      // Safely handle DNF positions so math doesn't break
+      const finishPos = result.position || 999; 
+
+      return {
+        ...result,
+        position: finishPos, // Map null DNF to 999
+        grid: startingSlot ? startingSlot.position : finishPos, 
+        broadcast_name: driverInfo?.broadcast_name || 'Unknown',
+        team_name: driverInfo?.team_name || 'Unknown',
+        team_colour: driverInfo?.team_colour || 'ffffff'
+      };
+    });
+
+    // THE FIX: Safely handle null/DNF positions by assigning them 999 during the sort
+    combinedData.sort((a: { position: number }, b: { position: number }) => {
+      const posA = a.position || 999;
+      const posB = b.position || 999;
+      return posA - posB;
+    });
+
+    return combinedData;
+
+  } catch (err) {
+    console.error("Race data fetch failed", err);
+    return { status: 'pending' };
+  }
 }
 
 export async function getPracticeResults(): Promise<SessionResult[] | PendingStatus> {
@@ -279,16 +411,81 @@ export async function getMeetingFormat(): Promise<{ hasSprint: boolean }> {
   return { hasSprint };
 }
 
-export async function getSprintQualifyingResults(): Promise<SessionResult[] | PendingStatus> {
-  const sessions = await getLatestMeetingSessions();
-  const sprintQuali = sessions.find((s: { session_name: string }) => 
-    s.session_name.toLowerCase().includes('sprint') && s.session_name.toLowerCase().includes('qual')
-  ) || sessions.find((s: { session_name: string }) => 
-    s.session_name.toLowerCase().includes('shootout')
-  );
+export async function getSprintQualifyingResults() {
+  try {
+    const sessions = await getLatestMeetingSessions();
+    const sprintSession = sessions.find((s: { session_name: string }) => s.session_name === 'Sprint');
+    const sprintQualiSession = sessions.find((s: { session_name: string }) => 
+      s.session_name === 'Sprint Qualifying' || s.session_name === 'Sprint Shootout'
+    );
+    
+    if (!sprintSession) return { status: 'pending' };
 
-  if (!sprintQuali) return { status: 'pending' };
-  return fetchSessionData(sprintQuali.session_key) as Promise<SessionResult[] | PendingStatus>;
+    // 1. Fetch Official Sprint Grid
+    const gridRes = await fetch(`https://api.openf1.org/v1/starting_grid?session_key=${sprintSession.session_key}`);
+    const gridData = await gridRes.json();
+    let safeGrid = Array.isArray(gridData) ? gridData : [];
+    
+    // Fallback if missing
+    if (safeGrid.length === 0 && sprintQualiSession) {
+        const qualiRes = await fetch(`https://api.openf1.org/v1/session_result?session_key=${sprintQualiSession.session_key}`);
+        const qualiData = await qualiRes.json();
+        safeGrid = Array.isArray(qualiData) ? qualiData : [];
+    }
+
+    // 2. ALWAYS fetch laps from Sprint Quali to guarantee we have times
+    const bestLaps = new Map();
+    if (sprintQualiSession) {
+        const lapsRes = await fetch(`https://api.openf1.org/v1/laps?session_key=${sprintQualiSession.session_key}`);
+        const lapsData = await lapsRes.json();
+        
+        if (Array.isArray(lapsData)) {
+            lapsData.forEach((lap: { driver_number: number; lap_duration: number }) => {
+                if (lap.lap_duration) {
+                   const currentBest = bestLaps.get(lap.driver_number) || 9999;
+                   if (lap.lap_duration < currentBest) {
+                       bestLaps.set(lap.driver_number, lap.lap_duration);
+                   }
+                }
+            });
+        }
+    }
+
+    // 3. Fetch Drivers
+    let driversRes = await fetch(`https://api.openf1.org/v1/drivers?session_key=${sprintSession.session_key}`);
+    let safeDrivers = await driversRes.json();
+    if (!Array.isArray(safeDrivers) || safeDrivers.length === 0) {
+      driversRes = await fetch(`https://api.openf1.org/v1/drivers?meeting_key=${sprintSession.meeting_key}`);
+      safeDrivers = await driversRes.json();
+      safeDrivers = Array.isArray(safeDrivers) ? safeDrivers : [];
+    }
+
+    // 4. Merge Grid, Laps, and Drivers
+    const combinedData = safeGrid.map((result: { driver_number: number; position: number; lap_duration?: number }) => {
+      const driverInfo = safeDrivers.find((d: { driver_number: number; broadcast_name: string; team_name: string; team_colour: string }) => 
+        Number(d.driver_number) === Number(result.driver_number)
+      );
+      
+      // Use our manually calculated lap if the grid API failed to provide it
+      const finalLapDuration = result.lap_duration || bestLaps.get(result.driver_number);
+
+      return {
+        driver_number: result.driver_number,
+        position: result.position || 999, 
+        lap_duration: finalLapDuration, 
+        broadcast_name: driverInfo?.broadcast_name || 'Unknown',
+        team_name: driverInfo?.team_name || 'Unknown',
+        team_colour: driverInfo?.team_colour || 'ffffff'
+      };
+    });
+
+    combinedData.sort((a: { position: number }, b: { position: number }) => a.position - b.position);
+    return combinedData;
+    
+  } catch (err) {
+    console.error("Sprint Starting grid fetch failed", err);
+    return { status: 'pending' };
+  }
 }
 
 export async function getSprintResults(): Promise<SessionResult[] | PendingStatus> {

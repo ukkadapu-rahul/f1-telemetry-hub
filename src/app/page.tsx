@@ -51,10 +51,9 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ t
   // 3. LAZY FETCHING: Only hit the API for the exact tab the user clicked!
   if (currentTab === 'practice') {
     practiceResults = await getPracticeResults();
-  } else if (currentTab === 'sprint_quali') {
-    sprintQualiResults = hasSprint ? await getSprintQualifyingResults() : { status: 'pending' };
-    // <-- REMOVED topSpeedData = await getTopSpeedTrap();
   } else if (currentTab === 'sprint') {
+    // Fetch BOTH for the single Sprint tab
+    sprintQualiResults = hasSprint ? await getSprintQualifyingResults() : { status: 'pending' };
     sprintResults = hasSprint ? await getSprintResults() : { status: 'pending' };
   } else if (currentTab === 'quali') {
     qualiResults = await getQualifyingResults();
@@ -79,16 +78,28 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ t
           : <PracticeView results={practiceResults} />
       )}
 
-      {currentTab === 'sprint_quali' && (
-        !Array.isArray(sprintQualiResults) 
-          ? <PendingState message="Sprint Qualifying Results Not Yet Available" />
-          : <QualifyingView results={sprintQualiResults} /> 
-      )}
-
       {currentTab === 'sprint' && (
-        !Array.isArray(sprintResults) 
-          ? <PendingState message="Sprint Race Results Not Yet Available" />
-          : <GrandPrixView results={sprintResults} />
+        <div className="space-y-12">
+          {/* Top Half: Sprint Quali */}
+          <div>
+            <h2 className="text-2xl font-black text-slate-100 mb-6 px-4 uppercase tracking-wider">Sprint Qualifying</h2>
+            {!Array.isArray(sprintQualiResults) 
+              ? <PendingState message="Sprint Qualifying Results Not Yet Available" />
+              : <QualifyingView results={sprintQualiResults} />
+            }
+          </div>
+
+          <hr className="border-slate-800" />
+
+          {/* Bottom Half: Sprint Race */}
+          <div>
+            <h2 className="text-2xl font-black text-slate-100 mb-6 px-4 uppercase tracking-wider">Sprint Race</h2>
+            {!Array.isArray(sprintResults) 
+              ? <PendingState message="Sprint Race Results Not Yet Available" />
+              : <GrandPrixView results={sprintResults} />
+            }
+          </div>
+        </div>
       )}
       
       {currentTab === 'quali' && (
