@@ -11,6 +11,9 @@ import {
   getSprintResults,
   getSprintQualifyingResults,
   getMeetingFormat,
+  getRaceEvents,
+  getFastestLap, // <-- Fixed import
+  getFastestPitStop, // <-- Fixed import
   SessionResult,
   SeasonStandingsData,
   PendingStatus
@@ -19,7 +22,7 @@ import TopNav from "../components/layout/TopNav";
 import QualifyingView from "../components/views/QualifyingView";
 import GrandPrixView from "../components/views/GrandPrixView";
 import SeasonView from "../components/views/SeasonView";
-import PracticeView from "../components/views/PracticeView";
+import PracticeView from "../components/views/PracticeView"
 
 function PendingState({ message }: { message: string }) {
   return (
@@ -47,6 +50,9 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ t
   let raceResults: SessionResult[] | PendingStatus = { status: 'pending' };
   let seasonStandings: SeasonStandingsData | PendingStatus = { status: 'pending' };
   let topSpeedData = { speed: '--' as number | string, driver: 'N/A' };
+  let raceEventsData = null;
+  let fastestLapData = null; 
+  let fastestPitData = null; 
 
   // 3. LAZY FETCHING: Only hit the API for the exact tab the user clicked!
   if (currentTab === 'practice') {
@@ -60,6 +66,9 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ t
     topSpeedData = await getTopSpeedTrap();
   } else if (currentTab === 'race') {
     raceResults = await getRaceResults();
+    raceEventsData = await getRaceEvents();
+    fastestLapData = await getFastestLap(); 
+    fastestPitData = await getFastestPitStop(); 
   } else if (currentTab === 'season') {
     seasonStandings = await getSeasonStandings();
   }
@@ -111,7 +120,12 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ t
       {currentTab === 'race' && (
         !Array.isArray(raceResults)
           ? <PendingState message="Race Results Not Yet Available" />
-          : <GrandPrixView results={raceResults} />
+          : <GrandPrixView 
+              results={raceResults} 
+              events={raceEventsData} 
+              fastestLap={fastestLapData} 
+              fastestPit={fastestPitData} 
+            /> // <-- Cleaned up duplicate props
       )}
       
       {currentTab === 'season' && (

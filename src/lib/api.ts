@@ -8,6 +8,7 @@ export interface SessionResult {
   team_colour: string;
   grid?: number;
   points?: number;
+  lap_duration?: number;
 }
 
 export interface DriverStanding {
@@ -33,6 +34,39 @@ export interface SeasonStandingsData {
 
 export interface PendingStatus {
   status: string;
+}
+
+interface LapRecord {
+  lap_duration?: number;
+  lap_number: number;
+  driver_number: number;
+  is_pit_out_lap?: boolean;
+}
+
+interface PitRecord {
+  stop_duration?: number;
+  lane_duration?: number;
+  pit_duration?: number;
+  driver_number: number;
+}
+
+interface DriverRecord {
+  driver_number: number;
+  broadcast_name: string;
+  team_name?: string;
+  team_colour?: string;
+}
+
+interface GridRecord {
+  driver_number: number;
+  position: number;
+}
+
+interface RawSessionResult {
+  driver_number: number;
+  position?: number;
+  points?: number;
+  grid?: number;
 }
 
 // --- 1. DYNAMIC WEEKEND FETCHER --- //
@@ -79,8 +113,8 @@ async function fetchSessionData(sessionKey: number) {
       }
     }
 
-    const combinedData = safeResults.map((result: { driver_number: number; position: number; points: number; grid: number }) => {
-      const driverInfo = safeDrivers.find((d: { driver_number: number; broadcast_name: string; team_name: string; team_colour: string }) => d.driver_number === result.driver_number);
+    const combinedData = safeResults.map((result: { driver_number: number; position: number; points?: number; grid?: number }) => {
+      const driverInfo = safeDrivers.find((d: DriverRecord) => d.driver_number === result.driver_number);
       return {
         ...result,
         broadcast_name: driverInfo?.broadcast_name || 'Unknown',
@@ -89,7 +123,7 @@ async function fetchSessionData(sessionKey: number) {
       };
     });
 
-    combinedData.sort((a: { position: number }, b: { position: number }) => {
+    combinedData.sort((a: { position?: number }, b: { position?: number }) => {
       const posA = a.position || 999;
       const posB = b.position || 999;
       return posA - posB;
@@ -122,6 +156,24 @@ async function getLatestRaceSessionKey() {
 }
 
 // --- 3. VIEW FETCHERS --- //
+export async function getPracticeResults(): Promise<SessionResult[] | PendingStatus> {
+  try {
+    const sessions = await getLatestMeetingSessions();
+    const practiceSessions = sessions.filter((s: { session_name: string }) => 
+      s.session_name.toLowerCase().includes('practice')
+    );
+    
+    if (practiceSessions.length === 0) return { status: 'pending' };
+    
+    // Pick the most recent practice session (e.g. FP3 or FP2)
+    const latestPractice = practiceSessions[practiceSessions.length - 1];
+    return fetchSessionData(latestPractice.session_key) as Promise<SessionResult[] | PendingStatus>;
+  } catch (err) {
+    console.error("Practice results fetch failed", err);
+    return { status: 'pending' };
+  }
+}
+
 export async function getQualifyingResults() {
   try {
     const sessions = await getLatestMeetingSessions();
@@ -143,7 +195,7 @@ export async function getQualifyingResults() {
     }
 
     // 2. ALWAYS fetch laps from Qualifying to guarantee we have times
-    const bestLaps = new Map();
+    const bestLaps = new Map<number, number>();
     if (qualiSession) {
         const lapsRes = await fetch(`https://api.openf1.org/v1/laps?session_key=${qualiSession.session_key}`);
         const lapsData = await lapsRes.json();
@@ -170,12 +222,11 @@ export async function getQualifyingResults() {
     }
 
     // 4. Merge Grid, Laps, and Drivers
-    const combinedData = safeGrid.map((result: { driver_number: number; position: number; lap_duration?: number }) => {
-      const driverInfo = safeDrivers.find((d: { driver_number: number; broadcast_name: string; team_name: string; team_colour: string }) => 
+    const combinedData: SessionResult[] = safeGrid.map((result: { driver_number: number; position: number; lap_duration?: number }) => {
+      const driverInfo = safeDrivers.find((d: DriverRecord) => 
         Number(d.driver_number) === Number(result.driver_number)
       );
       
-      // Use our manually calculated lap if the grid API failed to provide it
       const finalLapDuration = result.lap_duration || bestLaps.get(result.driver_number);
 
       return {
@@ -188,7 +239,7 @@ export async function getQualifyingResults() {
       };
     });
 
-    combinedData.sort((a: { position: number }, b: { position: number }) => a.position - b.position);
+    combinedData.sort((a, b) => a.position - b.position);
     return combinedData;
     
   } catch (err) {
@@ -197,89 +248,50 @@ export async function getQualifyingResults() {
   }
 }
 
-export async function getRaceResults() {
+export async function getRaceResults(): Promise<SessionResult[] | PendingStatus> {
   try {
     const sessions = await getLatestMeetingSessions();
     const raceSession = sessions.find((s: { session_name: string }) => s.session_name === 'Race');
-    
     if (!raceSession) return { status: 'pending' };
 
-    // 1. Fetch Official Race Results
-    const resultsRes = await fetch(`https://api.openf1.org/v1/session_result?session_key=${raceSession.session_key}`);
-    const results = await resultsRes.json();
-    const safeResults = Array.isArray(results) ? results : [];
+    const [resultsRes, driversRes, gridRes] = await Promise.all([
+      fetch(`https://api.openf1.org/v1/session_result?session_key=${raceSession.session_key}`),
+      fetch(`https://api.openf1.org/v1/drivers?session_key=${raceSession.session_key}`),
+      fetch(`https://api.openf1.org/v1/starting_grid?session_key=${raceSession.session_key}`)
+    ]);
 
-    if (safeResults.length === 0) return { status: 'pending' };
+    const resultsData: RawSessionResult[] = await resultsRes.json();
+    const driversData: DriverRecord[] = await driversRes.json();
+    const gridData: GridRecord[] = await gridRes.json();
 
-    // 2. Fetch Starting Grid (To calculate Positions Gained/Lost)
-    const gridRes = await fetch(`https://api.openf1.org/v1/starting_grid?session_key=${raceSession.session_key}`);
-    const gridData = await gridRes.json();
-    const safeGrid = Array.isArray(gridData) ? gridData : [];
+    if (!Array.isArray(resultsData) || resultsData.length === 0) return { status: 'pending' };
 
-    // 3. Fetch Drivers (Bulletproof fallback using meeting_key)
-    let driversRes = await fetch(`https://api.openf1.org/v1/drivers?session_key=${raceSession.session_key}`);
-    let safeDrivers = await driversRes.json();
-    
-    if (!Array.isArray(safeDrivers) || safeDrivers.length === 0) {
-      driversRes = await fetch(`https://api.openf1.org/v1/drivers?meeting_key=${raceSession.meeting_key}`);
-      safeDrivers = await driversRes.json();
-      safeDrivers = Array.isArray(safeDrivers) ? safeDrivers : [];
-    }
-
-// 4. Merge Data
-    const combinedData = safeResults.map((result: { driver_number: number; position: number; points: number }) => {
-      const driverInfo = safeDrivers.find((d: { driver_number: number; broadcast_name: string; team_name: string; team_colour: string }) => 
-        Number(d.driver_number) === Number(result.driver_number)
-      );
-      
-      //Force strict Number() comparison to prevent string/number mismatches
-      const startingSlot = safeGrid.find((g: { driver_number: number; position: number }) => 
-        Number(g.driver_number) === Number(result.driver_number)
-      );
-
-      // Add a quick debug log so we can see it in the VS Code terminal
-      if (!startingSlot) {
-         console.warn(`Missing grid data for Driver ${result.driver_number}`);
-      }
-
-      // Safely handle DNF positions so math doesn't break
-      const finishPos = result.position || 999; 
+    const formattedResults: SessionResult[] = resultsData.map((result: RawSessionResult) => {
+      const driverInfo = Array.isArray(driversData) 
+        ? driversData.find((d: DriverRecord) => Number(d.driver_number) === Number(result.driver_number))
+        : null;
+        
+      const gridInfo = Array.isArray(gridData)
+        ? gridData.find((g: GridRecord) => Number(g.driver_number) === Number(result.driver_number))
+        : null;
 
       return {
-        ...result,
-        position: finishPos, // Map null DNF to 999
-        grid: startingSlot ? startingSlot.position : finishPos, 
-        broadcast_name: driverInfo?.broadcast_name || 'Unknown',
-        team_name: driverInfo?.team_name || 'Unknown',
-        team_colour: driverInfo?.team_colour || 'ffffff'
+        driver_number: result.driver_number,
+        position: result.position || 999,
+        grid: gridInfo?.position || result.position, 
+        broadcast_name: driverInfo?.broadcast_name || `Car #${result.driver_number}`,
+        team_name: driverInfo?.team_name || 'Unknown Team',
+        team_colour: driverInfo?.team_colour || 'ffffff',
+        points: result.points || 0 
       };
     });
 
-    // THE FIX: Safely handle null/DNF positions by assigning them 999 during the sort
-    combinedData.sort((a: { position: number }, b: { position: number }) => {
-      const posA = a.position || 999;
-      const posB = b.position || 999;
-      return posA - posB;
-    });
-
-    return combinedData;
-
+    formattedResults.sort((a: SessionResult, b: SessionResult) => a.position - b.position);
+    return formattedResults;
   } catch (err) {
-    console.error("Race data fetch failed", err);
+    console.error("Race results fetch failed", err);
     return { status: 'pending' };
   }
-}
-
-export async function getPracticeResults(): Promise<SessionResult[] | PendingStatus> {
-  const sessions = await getLatestMeetingSessions();
-  
-  const practiceSession = [...sessions].reverse().find((s: { session_name: string }) => 
-    s.session_name.includes('Practice')
-  );
-  
-  if (!practiceSession) return { status: 'pending' };
-  
-  return fetchSessionData(practiceSession.session_key) as Promise<SessionResult[] | PendingStatus>;
 }
 
 export async function getSeasonStandings(): Promise<SeasonStandingsData | PendingStatus> {
@@ -304,7 +316,7 @@ export async function getSeasonStandings(): Promise<SeasonStandingsData | Pendin
 
     const driversData = await Promise.all(
       safeDriverStandings.map(async (standing: { driver_number: number; position_current: number; points_current: number }) => {
-        let driverInfo = safeDrivers.find((d: { driver_number: number; broadcast_name: string; team_name: string; team_colour: string }) => 
+        let driverInfo = safeDrivers.find((d: DriverRecord) => 
           Number(d.driver_number) === Number(standing.driver_number)
         );
 
@@ -334,10 +346,10 @@ export async function getSeasonStandings(): Promise<SeasonStandingsData | Pendin
       })
     );
     
-    driversData.sort((a: { position: number }, b: { position: number }) => a.position - b.position);
+    driversData.sort((a, b) => a.position - b.position);
 
     const constructorsData = safeTeamStandings.map((team: { team_name: string; position_current: number; points_current: number }) => {
-      const teamDriver = safeDrivers.find((d: { team_name: string; team_colour: string }) => d.team_name === team.team_name);
+      const teamDriver = safeDrivers.find((d: DriverRecord) => d.team_name === team.team_name);
 
       return {
         team_name: team.team_name,
@@ -346,7 +358,7 @@ export async function getSeasonStandings(): Promise<SeasonStandingsData | Pendin
         team_colour: teamDriver?.team_colour || 'ffffff'
       };
     });
-    constructorsData.sort((a: { position: number }, b: { position: number }) => a.position - b.position);
+    constructorsData.sort((a, b) => a.position - b.position);
 
     return {
       drivers: driversData,
@@ -378,9 +390,9 @@ export async function getTopSpeedTrap() {
     const safeLaps = Array.isArray(laps) ? laps : [];
 
     let maxSpeed = 0;
-    let fastestDriverNumber = null;
+    let fastestDriverNumber: number | null = null;
 
-    safeLaps.forEach((lap: { st_speed: number; driver_number: number }) => {
+    safeLaps.forEach((lap: { st_speed?: number; driver_number: number }) => {
       if (lap.st_speed && lap.st_speed > maxSpeed) {
         maxSpeed = lap.st_speed;
         fastestDriverNumber = lap.driver_number;
@@ -421,20 +433,17 @@ export async function getSprintQualifyingResults() {
     
     if (!sprintSession) return { status: 'pending' };
 
-    // 1. Fetch Official Sprint Grid
     const gridRes = await fetch(`https://api.openf1.org/v1/starting_grid?session_key=${sprintSession.session_key}`);
     const gridData = await gridRes.json();
     let safeGrid = Array.isArray(gridData) ? gridData : [];
     
-    // Fallback if missing
     if (safeGrid.length === 0 && sprintQualiSession) {
         const qualiRes = await fetch(`https://api.openf1.org/v1/session_result?session_key=${sprintQualiSession.session_key}`);
         const qualiData = await qualiRes.json();
         safeGrid = Array.isArray(qualiData) ? qualiData : [];
     }
 
-    // 2. ALWAYS fetch laps from Sprint Quali to guarantee we have times
-    const bestLaps = new Map();
+    const bestLaps = new Map<number, number>();
     if (sprintQualiSession) {
         const lapsRes = await fetch(`https://api.openf1.org/v1/laps?session_key=${sprintQualiSession.session_key}`);
         const lapsData = await lapsRes.json();
@@ -451,7 +460,6 @@ export async function getSprintQualifyingResults() {
         }
     }
 
-    // 3. Fetch Drivers
     let driversRes = await fetch(`https://api.openf1.org/v1/drivers?session_key=${sprintSession.session_key}`);
     let safeDrivers = await driversRes.json();
     if (!Array.isArray(safeDrivers) || safeDrivers.length === 0) {
@@ -460,13 +468,11 @@ export async function getSprintQualifyingResults() {
       safeDrivers = Array.isArray(safeDrivers) ? safeDrivers : [];
     }
 
-    // 4. Merge Grid, Laps, and Drivers
-    const combinedData = safeGrid.map((result: { driver_number: number; position: number; lap_duration?: number }) => {
-      const driverInfo = safeDrivers.find((d: { driver_number: number; broadcast_name: string; team_name: string; team_colour: string }) => 
+    const combinedData: SessionResult[] = safeGrid.map((result: { driver_number: number; position: number; lap_duration?: number }) => {
+      const driverInfo = safeDrivers.find((d: DriverRecord) => 
         Number(d.driver_number) === Number(result.driver_number)
       );
       
-      // Use our manually calculated lap if the grid API failed to provide it
       const finalLapDuration = result.lap_duration || bestLaps.get(result.driver_number);
 
       return {
@@ -479,7 +485,7 @@ export async function getSprintQualifyingResults() {
       };
     });
 
-    combinedData.sort((a: { position: number }, b: { position: number }) => a.position - b.position);
+    combinedData.sort((a, b) => a.position - b.position);
     return combinedData;
     
   } catch (err) {
@@ -496,4 +502,167 @@ export async function getSprintResults(): Promise<SessionResult[] | PendingStatu
 
   if (!sprintRace) return { status: 'pending' };
   return fetchSessionData(sprintRace.session_key) as Promise<SessionResult[] | PendingStatus>;
+}
+
+export async function getRaceEvents() {
+  try {
+    const sessions = await getLatestMeetingSessions();
+    const raceSession = sessions.find((s: { session_name: string }) => s.session_name === 'Race');
+    if (!raceSession) return null;
+
+    const res = await fetch(`https://api.openf1.org/v1/race_control?session_key=${raceSession.session_key}`);
+    const data = await res.json();
+    
+    if (!Array.isArray(data)) return null;
+
+    let yellowFlags = 0;
+    let redFlags = 0;
+    let safetyCars = 0;
+    let vsc = 0;
+
+    let lastYellowTime = 0; 
+    const incidentWindow = 120000;
+
+    data.forEach((event: { flag?: string; message?: string; date?: string; category?: string; scope?: string }) => {
+      const flag = event.flag?.toUpperCase() || '';
+      const msg = event.message?.toUpperCase() || '';
+      const category = event.category || '';
+      const scope = event.scope || '';
+      const eventTime = event.date ? new Date(event.date).getTime() : 0;
+
+      if (category === 'SafetyCar') {
+        if (msg.includes('DEPLOYED')) {
+           if (msg.includes('VIRTUAL') || msg.includes('VSC')) {
+               vsc++;
+           } else {
+               safetyCars++;
+           }
+        }
+      }
+
+      if (category === 'Flag') {
+        if (flag === 'RED') redFlags++;
+        
+        if (flag === 'YELLOW' || flag === 'DOUBLE YELLOW') {
+          if (scope !== 'Driver') {
+             const timeSinceLast = eventTime - lastYellowTime;
+             lastYellowTime = eventTime; 
+             
+             if (timeSinceLast > incidentWindow) {
+                yellowFlags++;
+             }
+          }
+        }
+      }
+    });
+
+    return { yellowFlags, redFlags, safetyCars, vsc };
+  } catch (err) {
+    console.error("Race events fetch failed", err);
+    return null;
+  }
+}
+
+export async function getFastestLap() {
+  try {
+    const sessions = await getLatestMeetingSessions();
+    const raceSession = sessions.find((s: { session_name: string }) => s.session_name === 'Race');
+    if (!raceSession) return null;
+
+    const [lapsRes, driversRes] = await Promise.all([
+      fetch(`https://api.openf1.org/v1/laps?session_key=${raceSession.session_key}`),
+      fetch(`https://api.openf1.org/v1/drivers?session_key=${raceSession.session_key}`)
+    ]);
+
+    const lapsData: LapRecord[] = await lapsRes.json();
+    const driversData: DriverRecord[] = await driversRes.json();
+
+    if (!Array.isArray(lapsData) || lapsData.length === 0) return null;
+
+    const validLaps = lapsData.filter((lap: LapRecord) => lap.lap_duration && !lap.is_pit_out_lap);
+    if (validLaps.length === 0) return null;
+
+    let fastestLap = validLaps[0];
+    validLaps.forEach((lap: LapRecord) => {
+      if (lap.lap_duration && fastestLap.lap_duration && lap.lap_duration < fastestLap.lap_duration) {
+        fastestLap = lap;
+      }
+    });
+
+    const driverInfo = Array.isArray(driversData) 
+      ? driversData.find((d: DriverRecord) => Number(d.driver_number) === Number(fastestLap.driver_number))
+      : null;
+
+    return {
+      duration: fastestLap.lap_duration || 0,
+      lap_number: fastestLap.lap_number,
+      driver: driverInfo?.broadcast_name || `Car #${fastestLap.driver_number}`,
+      colour: driverInfo?.team_colour || 'ffffff'
+    };
+  } catch (err) {
+    console.error("Fastest lap fetch failed", err);
+    return null;
+  }
+}
+
+export async function getFastestPitStop() {
+  try {
+    const sessions = await getLatestMeetingSessions();
+    const raceSession = sessions.find((s: { session_name: string }) => s.session_name === 'Race');
+    if (!raceSession) return null;
+
+    const [pitRes, driversRes] = await Promise.all([
+      fetch(`https://api.openf1.org/v1/pit?session_key=${raceSession.session_key}`),
+      fetch(`https://api.openf1.org/v1/drivers?session_key=${raceSession.session_key}`)
+    ]);
+
+    const pitData: PitRecord[] = await pitRes.json();
+    const driversData: DriverRecord[] = await driversRes.json();
+
+    if (!Array.isArray(pitData) || pitData.length === 0) return null;
+
+    const stationaryStops = pitData.filter((pit: PitRecord) => 
+      pit.stop_duration && pit.stop_duration > 1.5 && pit.stop_duration < 8.0
+    );
+
+    let fastestPit: PitRecord;
+    let minTime: number;
+
+    if (stationaryStops.length > 0) {
+      fastestPit = stationaryStops[0];
+      minTime = fastestPit.stop_duration!;
+      stationaryStops.forEach((pit: PitRecord) => {
+        if (pit.stop_duration && pit.stop_duration < minTime) {
+          minTime = pit.stop_duration;
+          fastestPit = pit;
+        }
+      });
+    } else {
+      const lanePits = pitData.filter((pit: PitRecord) => pit.lane_duration || pit.pit_duration);
+      if (lanePits.length === 0) return null;
+
+      fastestPit = lanePits[0];
+      minTime = fastestPit.lane_duration || fastestPit.pit_duration || 999;
+      lanePits.forEach((pit: PitRecord) => {
+        const time = pit.lane_duration || pit.pit_duration;
+        if (time && time < minTime) {
+          minTime = time;
+          fastestPit = pit;
+        }
+      });
+    }
+
+    const driverInfo = Array.isArray(driversData)
+      ? driversData.find((d: DriverRecord) => Number(d.driver_number) === Number(fastestPit.driver_number))
+      : null;
+
+    return {
+      duration: minTime,
+      driver: driverInfo?.broadcast_name || `Car #${fastestPit.driver_number}`,
+      colour: driverInfo?.team_colour || 'ffffff'
+    };
+  } catch (err) {
+    console.error("Fastest pit fetch failed", err);
+    return null;
+  }
 }
